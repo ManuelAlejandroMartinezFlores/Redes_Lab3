@@ -1,36 +1,47 @@
-import socket
-import threading
 import json
 import time
+import redis
+import threading
 from dijkstra import *
 from flooding import *
 from collections import defaultdict
 
 class RouterNode:
-    def __init__(self, node_id, neighbors, port, all_nodes):
+    def __init__(self, node_id, neighbors, redis_config, all_nodes=None):
         """
-        Initialize a router node that can communicate via sockets.
+        Initialize a router node that can communicate via Redis Pub/Sub.
         
         Args:
-            node_id (str): Unique identifier for this node
-            neighbors (dict): {neighbor_id: cost} pairs
-            port (int): Base port number for this node
-            all_nodes (dict): Information about all nodes in the network
+            node_id (str): Unique identifier for this node (e.g., "sec10.grupo0.nnovella")
+            neighbors (list): List of neighbor node IDs
+            redis_config (dict): Configuration for Redis connection
+            all_nodes (dict, optional): Information about all nodes in the network
         """
         self.node_id = node_id
         self.neighbors = neighbors
-        self.port = port
-        self.all_nodes = all_nodes
+        self.redis_config = redis_config
+        self.all_nodes = all_nodes or {}
+        
+        # Redis connection
+        self.r = redis.Redis(
+            host=redis_config['host'],
+            port=redis_config['port'],
+            password=redis_config['password'],
+            decode_responses=True
+        )
+        self.pubsub = self.r.pubsub()
+        
+        # Algorithm state
         self.link_state_db = {}
         self.seq_num = 0
         self.routing_table = {}
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.settimeout(1.0)  # Add timeout to prevent blocking
-        self.socket.bind(('localhost', port))
         self.running = True
         
         # Initialize with own link state
         self.update_link_state()
+        
+        # Subscribe to own channel
+        self.pubsub.subscribe(self.node_id)
         
         # Start listening for messages
         threading.Thread(target=self.listen_for_messages, daemon=True).start()
@@ -39,77 +50,166 @@ class RouterNode:
         """Update the link state database with current neighbor information."""
         self.link_state_db[self.node_id] = {
             'seq_num': self.seq_num,
-            'neighbors': dict(self.neighbors)
+            'neighbors': list(self.neighbors)
         }
     
     def send_message(self, destination_id, message):
-        """Send a message to another node."""
-        dest_port = self.all_nodes[destination_id]['port']
+        """Send a message to another node via Redis."""
         try:
-            self.socket.sendto(json.dumps(message).encode(), ('localhost', dest_port))
+            # Add standard message fields
+            # message['from'] = self.node_id
+            message['to'] = destination_id
+            message['hops'] = message.get('hops', 0) + 1
+            
+            # Publish to destination channel
+            self.r.publish(destination_id, json.dumps(message))
+            
         except Exception as e:
             print(f"{self.node_id}: Error sending to {destination_id}: {str(e)}")
+    
+    def broadcast_to_neighbors(self, message, exclude=None):
+        """Send a message to all neighbors except excluded ones."""
+        exclude = exclude or []
+        for neighbor in self.neighbors:
+            if neighbor not in exclude:
+                self.send_message(neighbor, message)
     
     def flood_lsa(self):
         """Flood Link State Advertisement to all neighbors."""
         self.seq_num += 1
         self.update_link_state()
         
-        lsa = {
+        lsa_message = {
             'type': 'LSA',
-            'source': self.node_id,
             'seq_num': self.seq_num,
-            'neighbors': dict(self.neighbors)
+            'neighbors': list(self.neighbors),
+            'headers': [{'timestamp': time.time()}],
+            'from': self.node_id,
         }
         
-        print(f"{self.node_id}: Flooding LSA (seq {self.seq_num}) a vecinos: {list(self.neighbors.keys())}")
-        for neighbor in self.neighbors:
-            self.send_message(neighbor, lsa)
+        print(f"{self.node_id}: Flooding LSA (seq {self.seq_num}) to neighbors: {self.neighbors}")
+        self.broadcast_to_neighbors(lsa_message)
+    
+    def send_hello(self, destination_id):
+        """Send a HELLO/PING message to a node."""
+        hello_message = {
+            'type': 'HELLO',
+            'payload': 'Ping request',
+            'headers': [{'timestamp': time.time()}]
+        }
+        self.send_message(destination_id, hello_message)
+    
+    def send_data(self, destination_id, message_content):
+        """Send a DATA/MESSAGE to another node."""
+        data_message = {
+            'type': 'MESSAGE',
+            'payload': message_content,
+            'headers': [{'timestamp': time.time()}]
+        }
+        self.send_message(destination_id, data_message)
+    
+    def process_message(self, message):
+        """Process incoming message based on its type."""
+        msg_type = message.get('type', '')
+        
+        if msg_type == 'LSA':
+            self.process_lsa(message)
+        elif msg_type == 'HELLO':
+            self.process_hello(message)
+        elif msg_type == 'MESSAGE':
+            self.process_data_message(message)
+        elif msg_type == 'TABLE':
+            self.process_table_info(message)
+        else:
+            print(f"{self.node_id}: Unknown message type: {msg_type}")
+    
+    def process_lsa(self, lsa):
+        """Process incoming Link State Advertisement and update topology."""
+        source = lsa['from']
+        seq_num = lsa['seq_num']
+        incoming_neighbors = lsa['neighbors']
+        
+        # Check if this is a newer LSA or if we have no record of this node
+        if (source not in self.link_state_db or 
+            seq_num > self.link_state_db[source].get('seq_num', -1)):
+            
+            # Update our link state database with the new information
+            self.link_state_db[source] = {
+                'seq_num': seq_num,
+                'neighbors': incoming_neighbors
+            }
+            
+            print(f"{self.node_id}: Updated topology with information from {source}")
+            print(f"{self.node_id}: {source} neighbors: {incoming_neighbors}")
+            
+            # Forward to all neighbors except the one it came from
+            # This is the key part of the flooding algorithm
+            for neighbor in self.neighbors:
+                if neighbor != source:  # Don't send back to the source
+                    print(f"{self.node_id}: Forwarding LSA from {source} to {neighbor}")
+                    self.send_message(neighbor, lsa)
+        else:
+            # We already have this or a newer LSA, no need to process or forward
+            print(f"{self.node_id:}: Ignoring old LSA from {source} (seq {seq_num}, have seq {self.link_state_db[source].get('seq_num', -1)})")
+    
+    def process_hello(self, hello_msg):
+        """Process HELLO/PING message."""
+        print(f"{self.node_id}: Received HELLO from {hello_msg['from']}")
+        # Could send a response here if needed
+    
+    def process_data_message(self, data_msg):
+        """Process DATA/MESSAGE."""
+        print(f"{self.node_id}: Received MESSAGE from {data_msg['from']}: {data_msg['payload']}")
+        # If this node is not the final destination, forward according to routing table
+        if data_msg.get('to') != self.node_id:
+            next_hop = self.get_next_hop(data_msg['to'])
+            if next_hop:
+                self.send_message(next_hop, data_msg)
+    
+    def process_table_info(self, table_msg):
+        """Process TABLE/INFO message."""
+        # Implementation depends on the routing algorithm
+        pass
+    
+    def get_next_hop(self, destination):
+        """Get next hop for destination based on routing table."""
+        # This would use the calculated routing table
+        # Simplified implementation for demonstration
+        if destination in self.neighbors:
+            return destination
+        
+        # For more complex routing, use the calculated path
+        path, _, _ = self.calculate_path(destination, 'dijkstra')
+        if path and len(path) > 1:
+            return path[1]  # Next hop is the second element in path
+        
+        return None
     
     def listen_for_messages(self):
-        """Listen for incoming messages and process them."""
+        """Listen for incoming messages from Redis and process them."""
         while self.running:
             try:
-                data, addr = self.socket.recvfrom(1024)
-                message = json.loads(data.decode())
+                message = self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is not None:
+                    decoded_msg = json.loads(message['data'])
+                    self.process_message(decoded_msg)
                 
-                if message['type'] == 'LSA':
-                    self.process_lsa(message)
-                    
-            except socket.timeout:
-                continue  # Just continue on timeout
+            except redis.ConnectionError:
+                print(f"{self.node_id}: Redis connection error")
+                time.sleep(2)  # Wait before retrying
             except json.JSONDecodeError:
                 print(f"{self.node_id}: Error decoding message")
             except Exception as e:
-                if self.running:  # Only print errors if we're still running
+                if self.running:
                     print(f"{self.node_id}: Error in message processing - {str(e)}")
-    
-    def process_lsa(self, lsa):
-        """Process incoming Link State Advertisement."""
-        source = lsa['source']
-        seq_num = lsa['seq_num']
-        
-        # Update if this is a newer LSA
-        if source not in self.link_state_db or seq_num > self.link_state_db[source].get('seq_num', -1):
-            self.link_state_db[source] = {
-                'seq_num': seq_num,
-                'neighbors': lsa['neighbors']
-            }
-            
-            print(f"{self.node_id}: Se actualizo topología con información de {source}")
-            
-            # Forward to all neighbors except the one it came from
-            for neighbor in self.neighbors:
-                if neighbor != source:
-                    self.send_message(neighbor, lsa)
     
     def build_network_graph(self):
         """Build the complete network graph from link state database."""
         graph = {}
         for node, info in self.link_state_db.items():
-            graph[node] = info['neighbors']
+            # Convert neighbor list to dict with unit cost (1) for all links
+            graph[node] = {neighbor: 1 for neighbor in info['neighbors']}
         return graph
-    
     
     def calculate_path(self, target, algorithm='dijkstra'):
         """Calculate path to target using specified algorithm."""
@@ -144,103 +244,47 @@ class RouterNode:
         graph = self.build_network_graph()
         print(f"\nTopología conocida de {self.node_id}, ({len(graph)} nodos):")
         for node, neighbors in graph.items():
-            print(f"  {node}: {neighbors}")
+            print(f"  {node}: {list(neighbors.keys())}")
     
     def stop(self):
         """Stop the router."""
         self.running = False
-        self.socket.close()
+        self.pubsub.close()
 
-def create_network():
-    """Create a test network with multiple router nodes."""
-    # Define network topology and ports
-    network = {
-        'A': {'neighbors': {'B': 1, 'C': 4}, 'port': 5000},
-        'B': {'neighbors': {'A': 1, 'C': 2, 'D': 5}, 'port': 5001},
-        'C': {'neighbors': {'A': 4, 'B': 2, 'D': 1}, 'port': 5002},
-        'D': {'neighbors': {'B': 5, 'C': 1, 'E': 3}, 'port': 5003},
-        'E': {'neighbors': {'D': 3}, 'port': 5004}
+# Example usage
+if __name__ == "__main__":
+    # Redis configuration from the lab document
+    redis_config = {
+        'host': 'lab3.redesuvg.cloud',
+        'port': 6379,
+        'password': 'UVGRedis2025'
     }
     
-    # Create router instances
-    routers = {}
-    for node_id, info in network.items():
-        routers[node_id] = RouterNode(
-            node_id=node_id,
-            neighbors=info['neighbors'],
-            port=info['port'],
-            all_nodes=network
-        )
-        print(f"Created router {node_id} on port {info['port']}")
+    # Example node configuration (would come from the provided files)
+    node_id = "sec10.grupo0.nnovella"  # Example format from document
+    neighbors = ["sec10.grupo1.user2", "sec10.grupo2.user3"]  # Example neighbors
     
-    return routers
-
-def test_routing_algorithms(routers):
-    """Test the routing algorithms on the network."""
-    # Let the network stabilize (LSAs propagate)
-    print("\nWaiting for LSA propagation (3 seconds)...")
-    time.sleep(3)
+    # Create router node
+    router = RouterNode(node_id, neighbors, redis_config)
     
-    # Print each router's topology view
-    print("\n=== Network Topology Views ===")
-    for router in routers.values():
-        router.print_topology()
-    
-    # Test Dijkstra's algorithm
-    print("\n" + "="*50)
-    print("TESTING DIJKSTRA'S ALGORITHM")
-    print("="*50)
-    
-    test_cases = [
-        ('A', 'E'),  # A → C → D → E (cost: 4+1+3=8)
-        ('D', 'B'),  # D → C → B (cost: 1+2=3)
-        ('E', 'C'),  # E → D → C (cost: 3+1=4)
-        ('B', 'A'),  # B → A (cost: 1)
-    ]
-    
-    for start, target in test_cases:
-        path = routers[start].request_route(target, 'dijkstra')
-    
-    # Test Flooding algorithm
-    print("\n" + "="*50)
-    print("TESTING FLOODING ALGORITHM")
-    print("="*50)
-    
-    # Use smaller test cases for flooding to avoid too many packets
-    flooding_test_cases = [
-        ('A', 'D'),  # Should find A → B → D or A → C → D
-        ('E', 'B'),  # Should find E → D → C → B
-        ('C', 'A'),  # Should find C → A
-    ]
-    
-    for start, target in flooding_test_cases:
-        path = routers[start].request_route(target, 'flooding')
-        time.sleep(0.5)  # Small delay between tests
-
-def main():
-    """Main function to run the simulation."""
-    print("=== Local Network Routing Simulation ===")
-    print("Creating network with 5 routers (A, B, C, D, E)...")
-    
-    routers = create_network()
-    
-    # Start LSA flooding
-    print("\nStarting LSA flooding...")
-    for router in routers.values():
+    try:
+        # Send initial LSA to announce presence
         router.flood_lsa()
-    
-    # Wait a moment for initial flooding
-    time.sleep(2)
-    
-    # Test the routing algorithms
-    test_routing_algorithms(routers)
-    
-    # Clean up
-    print("\nShutting down routers...")
-    for router in routers.values():
+        
+        # Wait a bit for topology to stabilize
+        time.sleep(2)
+        
+        # Calculate path to another node
+        target = "sec10.grupo3.user4"
+        router.request_route(target, 'dijkstra')
+        
+        # Send a test message
+        router.send_data(target, "Hello from our redesigned router!")
+        
+        # Keep running
+        while True:
+            time.sleep(1)
+            
+    except KeyboardInterrupt:
+        print("Shutting down router...")
         router.stop()
-    
-    print("Simulation complete.")
-
-if __name__ == "__main__":
-    main()

@@ -1,21 +1,34 @@
 from router import *
 
 if __name__ == "__main__":
-    ROUTER_ID = "C"
-    PORT = 5002
-    router = RouterNode("C", {"B":1}, 5002, {"A":{"port":5000}, "B":{"port":5001}, "C":{"port":5002}})
+    # Configuración de Redis del laboratorio
+    REDIS_CONFIG = {
+        'host': 'localhost',
+        'port': 6379,
+        'password': None
+    }
+    
+    # Información del nodo (debería venir de los archivos de configuración)
+    ROUTER_ID = "sec10.grupo0.C"  # Ejemplo usando el formato especificado
+    NEIGHBORS = ["sec10.grupo0.B"]  # Vecinos iniciales
+    
+    # Crear instancia del router con Redis
+    router = RouterNode(ROUTER_ID, NEIGHBORS, REDIS_CONFIG)
+    
     print(f"=== Router {ROUTER_ID} Started ===")
-    print(f"Port: {PORT}")
+    print(f"Conectado a Redis: {REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}")
+    print("Vecinos iniciales:", NEIGHBORS)
     print("\nIngrese comando:")
     print("  'flood' - Flood LSA a vecinos")
     print("  'topo' - Topología conocida")
-    print("  'route <objetivo> <algoritmo>' - Calcula la ruta (e.g., 'route E dijkstra')")
-    print("  'ping <objetivo>' - Ping")
-    print("  'quit' - Exit")
+    print("  'route <objetivo> <algoritmo>' - Calcula la ruta (e.g., 'route D dijkstra')")
+    print("  'ping <objetivo>' - Enviar ping")
+    print("  'send <objetivo> <mensaje>' - Enviar mensaje")
+    print("  'quit' - Salir")
     
     try:
         while True:
-            command = input("\nCommand: ").strip().lower()
+            command = input("\nCommand: ").strip()
             
             if command == 'flood':
                 router.flood_lsa()
@@ -27,35 +40,38 @@ if __name__ == "__main__":
             elif command.startswith('route '):
                 parts = command.split()
                 if len(parts) >= 3:
-                    target = parts[1].upper()
+                    target = parts[1]  # Ya no necesita uppercase con el nuevo formato
                     algorithm = parts[2]
-                    path, cost, algo = router.calculate_path(target, algorithm)
-                    if path:
-                        print(f"Path to {target}: {' → '.join(path)} (cost: {cost})")
-                    else:
-                        print(f"No path to {target} found")
+                    path = router.request_route(target, algorithm)
                 else:
                     print("Usage: route <target> <algorithm>")
                     
             elif command.startswith('ping '):
                 parts = command.split()
                 if len(parts) >= 2:
-                    target = parts[1].upper()
-                    if target in network_config:
-                        router.send_message(target, {'type': 'PING', 'source': node_id, 'target': target})
-                        print(f"Ping sent to {target}")
-                    else:
-                        print(f"Unknown target: {target}")
+                    target = parts[1]
+                    router.send_hello(target)
+                    print(f"Ping enviado a {target}")
                 else:
                     print("Usage: ping <target>")
+                    
+            elif command.startswith('send '):
+                parts = command.split(' ', 2)  # Dividir solo en los primeros dos espacios
+                if len(parts) >= 3:
+                    target = parts[1]
+                    message = parts[2]
+                    router.send_data(target, message)
+                    print(f"Mensaje enviado a {target}")
+                else:
+                    print("Usage: send <target> <message>")
                     
             elif command == 'quit':
                 break
                 
             else:
-                print("Unknown command")
+                print("Comando desconocido. Comandos disponibles: flood, topo, route, ping, send, quit")
                 
     except KeyboardInterrupt:
-        print("\\nShutting down...")
+        print("\nApagando...")
     finally:
         router.stop()
