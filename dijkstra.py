@@ -36,3 +36,30 @@ def dijkstra(graph, start, target):
     path = path[::-1]
     
     return (path, distances[target]) if path and path[0] == start else ([], float('infinity'))
+
+
+def dijkstra_all(graph, start):
+    """Dijkstra's algorithm that returns distances and predecessors for all nodes."""
+    import heapq
+    
+    distances = {node: float('inf') for node in graph}
+    predecessors = {node: None for node in graph}
+    distances[start] = 0
+    
+    priority_queue = [(0, start)]
+    
+    while priority_queue:
+        current_distance, current_node = heapq.heappop(priority_queue)
+        
+        if current_distance > distances[current_node]:
+            continue
+            
+        for neighbor, weight in graph[current_node].items():
+            distance = current_distance + weight
+            
+            if distance < distances[neighbor]:
+                distances[neighbor] = distance
+                predecessors[neighbor] = current_node
+                heapq.heappush(priority_queue, (distance, neighbor))
+    
+    return distances, predecessors
