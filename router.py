@@ -25,6 +25,12 @@ class RouterNode:
         self.redis_config = redis_config
         self.algorithm = router_config['algorithm']
         self.all_nodes = all_nodes or {}
+
+        self.neighbor_last_seen = {neighbor: time.time() for neighbor in neighbors}
+        self.known_neighbors = set(neighbors)  # All neighbors we've ever known
+        self.hello_interval = 5  # seconds between hello messages
+        self.timeout_threshold = 15  # seconds to consider neighbor dead
+        self.discovery_interval = 30  # seconds between discovery attempts
         
         # Redis connection
         self.r = redis.Redis(
@@ -52,17 +58,209 @@ class RouterNode:
         # Start listening for messages
         threading.Thread(target=self.listen_for_messages, daemon=True).start()
         
-        print(f"{self.node_id}: {self.algorithm.upper()} Router initialized")
-        print(f"{self.node_id}: Neighbors: {neighbors}")
+        # Start neighbor monitoring
+        threading.Thread(target=self._monitor_neighbors, daemon=True).start()
+        
+        # Start neighbor discovery
+        # threading.Thread(target=self._discover_neighbors, daemon=True).start()
+
+        
     
+    
+    def _monitor_neighbors(self):
+        """Monitor neighbors for failure detection."""
+        while self.running:
+            try:
+                current_time = time.time()
+                dead_neighbors = []
+                
+                # Check for timed out neighbors
+                for neighbor in list(self.neighbor_last_seen.keys()):
+                    if current_time - self.neighbor_last_seen[neighbor] > self.timeout_threshold:
+                        if neighbor in self.neighbors:  # Only if still considered active
+                            dead_neighbors.append(neighbor)
+                            print(f"{self.node_id}: Vecino {neighbor} parece estar caído (timeout)")
+                
+                # Handle dead neighbors
+                for dead_neighbor in dead_neighbors:
+                    self._handle_neighbor_failure(dead_neighbor)
+                
+                # Send hello messages to active neighbors
+                self._send_hello_to_neighbors()
+                
+                time.sleep(self.hello_interval)
+                
+            except Exception as e:
+                print(f"{self.node_id}: Error en monitoreo de vecinos: {e}")
+    
+    def _discover_neighbors(self):
+        """Periodically attempt to discover new neighbors."""
+        while self.running:
+            try:
+                # Send discovery messages to known but inactive neighbors
+                inactive_neighbors = self.known_neighbors# - set(self.neighbors)
+                for neighbor in inactive_neighbors:
+                    self.send_hello(neighbor)
+                    # print(f"{self.node_id}: 🔍 Intentando redescubrir vecino {neighbor}")
+                
+                time.sleep(self.discovery_interval)
+                
+            except Exception as e:
+                print(f"{self.node_id}: Error en descubrimiento de vecinos: {e}")
+    
+    def _send_hello_to_neighbors(self):
+        """Send hello messages to all active neighbors."""
+        for neighbor in self.neighbors:
+            self.send_hello(neighbor)
+    
+    def _handle_neighbor_failure(self, dead_neighbor):
+        """Handle a neighbor failure."""
+        print(f"{self.node_id}: Manejando caída del vecino {dead_neighbor}")
+        
+        # Remove from active neighbors
+        if dead_neighbor in self.neighbors:
+            self.neighbors.remove(dead_neighbor)
+        
+        # Remove from monitoring (but keep in known_neighbors for rediscovery)
+        if dead_neighbor in self.neighbor_last_seen:
+            del self.neighbor_last_seen[dead_neighbor]
+        
+        if self.algorithm == 'distance_vector':
+            # Remove from neighbor vectors
+            if dead_neighbor in self.neighbor_vectors:
+                del self.neighbor_vectors[dead_neighbor]
+
+            routes_to_invalidate = []
+            for destination, next_hop in self.routing_table.items():
+                if next_hop == dead_neighbor:
+                    routes_to_invalidate.append(destination)
+            
+            # Invalidate these routes by setting cost to infinity
+            for destination in routes_to_invalidate:
+                self.distance_vector[destination] = float('inf')
+                if destination in self.routing_table:
+                    del self.routing_table[destination]
+                print(f"{self.node_id}: Invalidated route to {destination} (via {dead_neighbor})")
+            
+            # Remove the neighbor itself from distance vector
+            if dead_neighbor in self.distance_vector:
+                del self.distance_vector[dead_neighbor]
+            
+            # Force immediate Bellman-Ford recalculation and broadcast
+            self.apply_bellman_ford()
+            
+            # Always broadcast after a neighbor failure, even if no immediate change
+            # This ensures the failure information propagates through the network
+            print(f"{self.node_id}: Broadcasting failure update for {dead_neighbor}")
+            self.broadcast_distance_vector()
+            
+            
+        elif self.algorithm == 'link_state':
+            # Update link state database
+            self.link_state_db[self.node_id] = {
+                'seq_num': self.seq_num,
+                'neighbors': self.neighbors.copy()
+            }
+            
+            # Flood updated LSA
+            self.flood_lsa()
+            
+            # Recalculate routing table
+            self.calculate_routing_table()
+    
+    def _handle_new_neighbor(self, new_neighbor):
+        """Handle discovery of a new neighbor."""
+        print(f"{self.node_id}: Nuevo vecino descubierto: {new_neighbor}")
+        
+        # Add to active neighbors
+        if new_neighbor not in self.neighbors:
+            self.neighbors.append(new_neighbor)
+        
+        # Add to monitoring
+        self.neighbor_last_seen[new_neighbor] = time.time()
+        self.known_neighbors.add(new_neighbor)
+        
+        if self.algorithm == 'distance_vector':
+            # Add to distance vector and routing table
+            self.distance_vector[new_neighbor] = 1
+            self.routing_table[new_neighbor] = new_neighbor
+            
+            # Request distance vector from new neighbor
+            self.send_hello(new_neighbor)
+            
+            # Recalculate and broadcast
+            updated = self.apply_bellman_ford()
+            if updated:
+                self.broadcast_distance_vector()
+            
+        elif self.algorithm == 'link_state':
+            # Update link state database
+            self.link_state_db[self.node_id] = {
+                'seq_num': self.seq_num,
+                'neighbors': self.neighbors.copy()
+            }
+            
+            # Flood updated LSA
+            self.flood_lsa()
+            
+            # Recalculate routing table
+            self.calculate_routing_table()
+    
+    def send_message(self, destination_id, message):
+        """Send a message to another node via Redis."""
+        try:
+            # Add standard message fields
+            message['from'] = self.node_id
+            message['to'] = destination_id
+            message['hops'] = message.get('hops', 0) + 1
+            message['timestamp'] = time.time()
+            
+            # Publish to destination channel
+            self.r.publish(destination_id, json.dumps(message))
+            
+        except Exception as e:
+            print(f"{self.node_id}: Error sending to {destination_id}: {str(e)}")
+    
+    def broadcast_to_neighbors(self, message, exclude=None):
+        """Send a message to all neighbors except excluded ones."""
+        exclude = exclude or []
+        for neighbor in self.neighbors:
+            if neighbor not in exclude:
+                self.send_message(neighbor, message)
+    
+    def send_hello(self, destination_id):
+        """Send HELLO message to a node."""
+        hello_message = {
+            'type': 'HELLO',
+            'payload': 'ping',
+            'headers': [{'timestamp': time.time()}],
+            'from': self.node_id
+        }
+        self.send_message(destination_id, hello_message)
+    
+    def process_hello(self, hello_msg):
+        """Process HELLO message and update neighbor status."""
+        source = hello_msg['from']
+        
+        # Update last seen time
+        self.neighbor_last_seen[source] = time.time()
+        self.known_neighbors.add(source)
+        
+        # If this is a new neighbor, handle it
+        if source not in self.neighbors:
+            self._handle_new_neighbor(source)
+        # else:
+        #     print(f"{self.node_id}: Received HELLO from {source}")
     def set_routing_algorithm(self, algorithm):
         self.routing_algo = algorithm
     
     def _init_distance_vector(self):
-        """Initialize Distance Vector specific state."""
+        """Initialize Distance Vector specific state with poison reverse."""
         self.distance_vector = {self.node_id: 0}  # Distance to self is 0
         self.routing_table = {}  # Next hop for each destination
         self.neighbor_vectors = {}  # Distance vectors received from neighbors
+        self.poison_reverse = True  # Enable poison reverse
+        self.split_horizon = True  # Enable split horizon
         
         # Initialize with direct neighbors (cost 1)
         for neighbor in self.neighbors:
@@ -115,7 +313,7 @@ class RouterNode:
             
             # Publish to destination channel
             self.r.publish(destination_id, json.dumps(message))
-            print(f"{self.node_id}: Message sent to {destination_id}")
+            # print(f"{self.node_id}: Message sent to {destination_id}")
             
         except redis.ConnectionError as e:
             print(f"{self.node_id}: Redis connection error sending to {destination_id}: {str(e)}")
@@ -131,22 +329,40 @@ class RouterNode:
     
     # ===== DISTANCE VECTOR METHODS =====
     def broadcast_distance_vector(self):
-        """Broadcast our distance vector to all neighbors."""
-        dv_message = {
-            'type': 'DV_UPDATE',
-            'distance_vector': self.distance_vector,
-            'headers': [{'timestamp': time.time()}],
-            'from': self.node_id
-        }
+        """Broadcast distance vector to all neighbors with poison reverse."""
+        for neighbor in self.neighbors:
+            neighbor_dv = {}
+            
+            # Include all routes except those that would cause routing loops
+            for destination, cost in self.distance_vector.items():
+                next_hop = self.routing_table.get(destination)
+                
+                # Basic split horizon: don't advertise route back to the neighbor that gave it to us
+                if next_hop == neighbor and destination != neighbor:
+                    # Poison reverse: advertise infinite cost instead of omitting
+                    neighbor_dv[destination] = float('inf')
+                else:
+                    neighbor_dv[destination] = cost
+            
+            # Always include direct neighbor routes
+            if neighbor in self.distance_vector:
+                neighbor_dv[neighbor] = self.distance_vector[neighbor]
+            
+            dv_message = {
+                'type': 'DV_UPDATE',
+                'distance_vector': neighbor_dv,
+                'headers': [{
+                    'timestamp': time.time(),
+                    'source': self.node_id
+                }],
+                'from': self.node_id
+            }
         
-        print(f"{self.node_id}: Broadcasting DV: {self.distance_vector}")
-        self.broadcast_to_neighbors(dv_message)
+            print(f"{self.node_id}: Sending DV to {neighbor}: {neighbor_dv}")
+            self.send_message(neighbor, dv_message)
     
     def process_dv_update(self, dv_msg):
         """Process incoming Distance Vector update."""
-        if self.algorithm != 'distance_vector':
-            return
-            
         source = dv_msg['from']
         received_vector = dv_msg['distance_vector']
         
@@ -154,6 +370,9 @@ class RouterNode:
         
         # Store the neighbor's distance vector
         self.neighbor_vectors[source] = received_vector
+        
+        # Update last seen time for this neighbor
+        self.neighbor_last_seen[source] = time.time()
         
         # Apply Bellman-Ford algorithm
         updated = self.apply_bellman_ford()
@@ -163,39 +382,70 @@ class RouterNode:
             print(f"{self.node_id}: DV updated: {self.distance_vector}")
             print(f"{self.node_id}: Routing table: {self.routing_table}")
             self.broadcast_distance_vector()
-    
+            
     def apply_bellman_ford(self):
-        """Apply Bellman-Ford algorithm to update distance vector."""
-        updated = False
+        """Apply Bellman-Ford algorithm with change detection."""
+        infinity = float('inf')
         
-        # Check routes through each neighbor
+        # Store old state for comparison
+        old_distance_vector = self.distance_vector.copy()
+        old_routing_table = self.routing_table.copy()
+        
+        # Create new temporary tables
+        new_distance_vector = {self.node_id: 0}
+        new_routing_table = {}
+        
+        # Add direct neighbors
+        for neighbor in self.neighbors:
+            new_distance_vector[neighbor] = 1
+            new_routing_table[neighbor] = neighbor
+        
+        # Process neighbor vectors
         for neighbor in self.neighbors:
             if neighbor not in self.neighbor_vectors:
                 continue
                 
             neighbor_vector = self.neighbor_vectors[neighbor]
-            cost_to_neighbor = 1  # Assume cost 1 to direct neighbors
+            cost_to_neighbor = 1
             
-            # For each destination in neighbor's vector
             for destination, neighbor_cost in neighbor_vector.items():
-                if destination == self.node_id:
+                if destination == self.node_id or neighbor_cost == infinity:
                     continue
-                
-                # Calculate total cost through this neighbor
+                    
                 total_cost = cost_to_neighbor + neighbor_cost
+                current_cost = new_distance_vector.get(destination, infinity)
                 
-                # Update if we found a better path
-                if (destination not in self.distance_vector or 
-                    total_cost < self.distance_vector[destination]):
-                    
-                    old_cost = self.distance_vector.get(destination, float('inf'))
-                    self.distance_vector[destination] = total_cost
-                    self.routing_table[destination] = neighbor
-                    
-                    print(f"{self.node_id}: Better path to {destination}: {old_cost} -> {total_cost} via {neighbor}")
-                    updated = True
+                if total_cost < current_cost:
+                    new_distance_vector[destination] = total_cost
+                    new_routing_table[destination] = neighbor
         
-        return updated
+        # Check if anything actually changed
+        changed = False
+        
+        # Check for new or updated routes
+        for destination, new_cost in new_distance_vector.items():
+            old_cost = old_distance_vector.get(destination, infinity)
+            old_next_hop = old_routing_table.get(destination)
+            new_next_hop = new_routing_table.get(destination)
+            
+            if (new_cost != old_cost or new_next_hop != old_next_hop):
+                changed = True
+                break
+        
+        # Check for removed routes
+        for destination in old_distance_vector:
+            if destination not in new_distance_vector and destination != self.node_id:
+                changed = True
+                break
+        
+        # Only update if something changed
+        if changed:
+            self.distance_vector = new_distance_vector
+            self.routing_table = new_routing_table
+            print(f"{self.node_id}: DV changed: {self.distance_vector}")
+            return True
+        
+        return False
     
     # ===== LINK STATE METHODS =====
     def flood_lsa(self):
@@ -374,21 +624,6 @@ class RouterNode:
         self.send_message(next_hop, data_message)
         return True
     
-    def process_message(self, message):
-        """Process incoming message based on its type."""
-        msg_type = message.get('type', '')
-        
-        if msg_type == 'DV_UPDATE':
-            self.process_dv_update(message)
-        elif msg_type == 'LSA':
-            self.process_lsa(message)
-        elif msg_type == 'MESSAGE':
-            self.process_data_message(message)
-        elif msg_type == 'HELLO':
-            self.process_hello(message)
-        else:
-            print(f"{self.node_id}: Unknown message type: {msg_type}")
-    
     def process_data_message(self, data_msg):
         """Process DATA/MESSAGE."""
         if data_msg.get('to') == self.node_id:
@@ -405,9 +640,24 @@ class RouterNode:
             else:
                 print(f"{self.node_id}: No route to {destination}, cannot forward message")
     
-    def process_hello(self, hello_msg):
-        """Process HELLO/PING message."""
-        print(f"{self.node_id}: Received HELLO from {hello_msg['from']}")
+    # def process_hello(self, hello_msg):
+    #     """Process HELLO/PING message."""
+    #     print(f"{self.node_id}: Received HELLO from {hello_msg['from']}")
+    
+    def process_message(self, message):
+        """Process incoming message based on its type."""
+        msg_type = message.get('type', '')
+        
+        if msg_type == 'DV_UPDATE':
+            self.process_dv_update(message)
+        elif msg_type == 'LSA':
+            self.process_lsa(message)
+        elif msg_type == 'MESSAGE':
+            self.process_data_message(message)
+        elif msg_type == 'HELLO':
+            self.process_hello(message)
+        else:
+            print(f"{self.node_id}: Unknown message type: {msg_type}")
     
     def listen_for_messages(self):
         """Listen for incoming messages from Redis and process them."""
@@ -426,6 +676,38 @@ class RouterNode:
             except Exception as e:
                 if self.running:
                     print(f"{self.node_id}: Error in message processing - {str(e)}")
+    
+    def add_static_neighbor(self, neighbor_id):
+        """Manually add a neighbor for discovery attempts."""
+        if neighbor_id not in self.known_neighbors:
+            self.known_neighbors.add(neighbor_id)
+            print(f"{self.node_id}: 🔍 Vecino {neighbor_id} agregado para descubrimiento")
+            self.send_hello(neighbor_id)
+        else:
+            print(f"{self.node_id}: Vecino {neighbor_id} ya conocido")
+    
+    def remove_neighbor(self, neighbor_id):
+        """Manually remove a neighbor."""
+        if neighbor_id in self.neighbors:
+            self._handle_neighbor_failure(neighbor_id)
+        elif neighbor_id in self.known_neighbors:
+            self.known_neighbors.remove(neighbor_id)
+            print(f"{self.node_id}: Vecino {neighbor_id} removido")
+        else:
+            print(f"{self.node_id}: Vecino {neighbor_id} no encontrado")
+    
+    def print_neighbor_status(self):
+        """Print current neighbor status."""
+        current_time = time.time()
+        print(f"\n{self.node_id} Estado de Vecinos:")
+        print("Vecinos activos:", self.neighbors)
+        print("Vecinos conocidos:", list(self.known_neighbors))
+        print("Última vez vistos:")
+        for neighbor, last_seen in self.neighbor_last_seen.items():
+            status = "✅ ACTIVO" if neighbor in self.neighbors else "❌ INACTIVO"
+            age = current_time - last_seen
+            print(f"  {neighbor}: {status}, hace {age:.1f}s")
+
     
     def print_routing_info(self):
         """Print the current routing information."""

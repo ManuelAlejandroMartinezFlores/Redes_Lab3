@@ -3,6 +3,8 @@
     "config": {
         "A": "routerA",
         "B": "routerB",
-        "C": "routerC"
+        "C": "routerC",
+        "D": "routerD",
+        "X": "routerX"
     }
 }

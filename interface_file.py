@@ -209,7 +209,7 @@ if __name__ == "__main__":
                 parts = command.split()
                 if len(parts) >= 2:
                     new_algorithm = parts[1]
-                    router.set_path_algorithm(new_algorithm)
+                    router.set_routing_algorithm(new_algorithm)
                 else:
                     print("Uso: algorithm <dijkstra|flooding>")
                     
