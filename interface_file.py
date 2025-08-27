@@ -138,9 +138,9 @@ def get_user_config():
 if __name__ == "__main__":
     # Configuración de Redis
     REDIS_CONFIG = {
-        'host': 'localhost',
+        'host': 'lab3.redesuvg.cloud',
         'port': 6379,
-        'password': None
+        'password': 'UVGRedis2025'
     }
     
     # Obtener configuración

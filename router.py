@@ -303,7 +303,7 @@ class RouterNode:
         try:
             # Add standard message fields
             # message['from'] = self.node_id
-            message['to'] = destination_id
+            # message['to'] = destination_id
             message['hops'] = message.get('hops', 0) + 1
             message['timestamp'] = time.time()
             
@@ -617,7 +617,9 @@ class RouterNode:
         data_message = {
             'type': 'MESSAGE',
             'payload': message_content,
-            'headers': [{'timestamp': time.time()}]
+            'headers': [{'timestamp': time.time()}],
+            'from': self.node_id,
+            'to': destination_id
         }
         
         print(f"{self.node_id}: Sending message to {destination_id} via {next_hop}")
