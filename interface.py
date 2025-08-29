@@ -30,26 +30,28 @@ def get_user_config():
         print("Usando algoritmo por defecto: distance_vector")
         algorithm = 'distance_vector'
         path_algorithm = None
+
+    wait = input('Tiempo de espera')
     
-    return node_id, neighbors, algorithm, path_algorithm
+    return node_id, neighbors, algorithm, path_algorithm, wait
 
 if __name__ == "__main__":
     # Configuración de Redis
     REDIS_CONFIG = {
-        'host': 'localhost',
+        'host': 'lab3.redesuvg.cloud',
         'port': 6379,
-        'password': None
+        'password': 'UVGRedis2025'
     }
     
     # Obtener configuración del usuario
-    ROUTER_ID, NEIGHBORS, ALGORITHM, PATH_ALGORITHM = get_user_config()
+    ROUTER_ID, NEIGHBORS, ALGORITHM, PATH_ALGORITHM, WAIT = get_user_config()
     ROUTER_CONFIG = {
         'algorithm': ALGORITHM,
         'routing_algorithm': PATH_ALGORITHM
     }
     
     # Crear instancia del router
-    router = RouterNode(ROUTER_ID, NEIGHBORS, REDIS_CONFIG, ROUTER_CONFIG)
+    router = RouterNode(ROUTER_ID, NEIGHBORS, REDIS_CONFIG, ROUTER_CONFIG, WAIT)
     
     print(f"\n=== Router {ROUTER_ID} Iniciado ===")
     print(f"Conectado a Redis: {REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}")

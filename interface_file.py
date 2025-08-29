@@ -105,34 +105,23 @@ def get_user_config():
     
     # Algorithm selection
     print("\nSelección de algoritmo de enrutamiento:")
-    print("1. distance_vector - Algoritmo de vector de distancias")
-    print("2. link_state - Algoritmo de estado de enlace")
+    print("1. flooding")
+    print("2. link_state")
     algorithm_choice = input("Elija algoritmo (1/2 o nombre): ").strip().lower()
     
-    if algorithm_choice in ['1', 'distance_vector', 'dv']:
-        algorithm = 'distance_vector'
-        path_algorithm = None
-    elif algorithm_choice in ['2', 'link_state', 'ls']:
+    if algorithm_choice in ['1', 'flooding']:
+        algorithm = 'flooding'
+    elif algorithm_choice in ['2', 'link_state']:
         algorithm = 'link_state'
-        # Ask for path algorithm if using link state
-        print("\nSelección de algoritmo de cálculo de ruta:")
-        print("1. dijkstra - Algoritmo de Dijkstra (óptimo)")
-        print("2. flooding - Algoritmo de flooding (descubrimiento)")
-        path_choice = input("Elija algoritmo de camino (1/2): ").strip().lower()
-        path_algorithm = 'dijkstra' if path_choice in ['1', 'dijkstra'] else 'flooding'
     else:
-        print("Usando algoritmo por defecto: distance_vector")
-        algorithm = 'distance_vector'
-        path_algorithm = None
+        print("Usando algoritmo por defecto: flooding")
+        algorithm = 'flooding'
     
     return {
         'node_id': config['node_id'],
         'neighbors': config['neighbors'],
-        'router_config': {
-            'algorithm': algorithm,
-            'routing_algorithm': path_algorithm
-        },
-        'user_id': user_id
+        'algorithm': algorithm,
+        'user_id': user_id,
     }
 
 if __name__ == "__main__":
@@ -154,35 +143,28 @@ if __name__ == "__main__":
         config['user_id'], 
         config['neighbors'], 
         REDIS_CONFIG, 
-        config['router_config']
+        config['algorithm'], 
     )
     
     print(f"\n=== Router {config['node_id']}: {config['user_id']} Iniciado ===")
     print(f"Conectado a Redis: {REDIS_CONFIG['host']}:{REDIS_CONFIG['port']}")
     print(f"Vecinos: {config['neighbors']}")
-    print(f"Algoritmo de enrutamiento: {config['router_config']['algorithm']}")
-    if config['router_config']['algorithm'] == 'link_state':
-        print(f"Algoritmo de cálculo de ruta: {config['router_config']['routing_algorithm']}")
+    print(f"Algoritmo de enrutamiento: {config['algorithm']}")
     
     # Comandos comunes
     common_commands = [
         "'info' - Mostrar información de enrutamiento",
         "'send <objetivo> <mensaje>' - Enviar mensaje",
-        "'ping <objetivo>' - Enviar ping",
-        "'route <objetivo>' - Mostrar ruta a objetivo",
+        "'hello <objetivo>' - Enviar hello",
         "'quit' - Salir"
     ]
     
     # Comandos específicos por algoritmo
     algorithm_specific_commands = []
-    if config['router_config']['algorithm'] == 'link_state':
+    if config['algorithm'] == 'link_state':
         algorithm_specific_commands = [
             "'flood' - Flood LSA a vecinos",
-            "'algorithm <dijkstra|flooding>' - Cambiar algoritmo de camino"
-        ]
-    elif config['router_config']['algorithm'] == 'distance_vector':
-        algorithm_specific_commands = [
-            "'update' - Forzar actualización de vector de distancias"
+            "'route <objetivo>' - Mostrar ruta a objetivo"
         ]
     
     # Mostrar todos los comandos
@@ -197,21 +179,9 @@ if __name__ == "__main__":
             if command == 'info':
                 router.print_routing_info()
                 
-            elif command == 'flood' and config['router_config']['algorithm'] == 'link_state':
+            elif command == 'flood' and config['algorithm'] == 'link_state':
                 router.flood_lsa()
                 print("LSA enviado a vecinos")
-                
-            elif command == 'update' and config['router_config']['algorithm'] == 'distance_vector':
-                router.broadcast_distance_vector()
-                print("Vector de distancias actualizado y enviado")
-                
-            elif command.startswith('algorithm ') and config['router_config']['algorithm'] == 'link_state':
-                parts = command.split()
-                if len(parts) >= 2:
-                    new_algorithm = parts[1]
-                    router.set_routing_algorithm(new_algorithm)
-                else:
-                    print("Uso: algorithm <dijkstra|flooding>")
                     
             elif command.startswith('send '):
                 parts = command.split(' ', 2)
@@ -226,16 +196,16 @@ if __name__ == "__main__":
                 else:
                     print("Uso: send <objetivo> <mensaje>")
                     
-            elif command.startswith('ping '):
+            elif command.startswith('hello '):
                 parts = command.split()
                 if len(parts) >= 2:
                     target = parts[1]
                     router.send_hello(target)
                     print(f"Ping enviado a {target}")
                 else:
-                    print("Uso: ping <objetivo>")
+                    print("Uso: hello <objetivo>")
                     
-            elif command.startswith('route '):
+            elif command.startswith('route ') and config['algorithm'] == 'link_state':
                 parts = command.split()
                 if len(parts) >= 2:
                     target = parts[1]
