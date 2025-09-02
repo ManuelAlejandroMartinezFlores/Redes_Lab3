@@ -1,8 +1,8 @@
 {
     "type": "names",
     "config": {
-        "A": "sec10.grupo1.routerA",
-        "B": "sec10.grupo1.routerB",
+        "A": "sec10.grupo1.A",
+        "B": "sec10.grupo5.A",
         "C": "sec10.grupo1.routerC",
         "D": "sec10.grupo1.routerD",
         "X": "sec10.grupo1.routerX"
