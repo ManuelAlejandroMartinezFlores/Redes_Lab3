@@ -429,7 +429,7 @@ class RouterNode:
                     return
                 if data_msg.get('to', '') in self.neighbors.keys():
                     self.send_message(data_msg.get('to', ''), data_msg)
-                    print(f'Compartiendo mensaje a {data_msg.get('to', '')}')
+                    print(f"Compartiendo mensaje a {data_msg.get('to', '')}")
                     return 
                 self.broadcast_to_neighbors(data_msg, exclude=[data_msg['from']])
     
