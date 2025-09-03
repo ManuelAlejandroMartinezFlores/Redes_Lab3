@@ -143,7 +143,7 @@ class RouterNode:
         print(f"{self.node_id}: Nuevo vecino descubierto: {new_neighbor}")
         
         # Add to active neighbors
-        if new_neighbor not in self.neighbors.keys():
+        if new_neighbor not in self.neighbors:
             self.neighbors[new_neighbor]= 1
         
         # Add to monitoring
@@ -151,13 +151,13 @@ class RouterNode:
         self.known_neighbors.add(new_neighbor)
             
         if self.algorithm == 'link_state':
+            self.seq_num += 1
             # Update link state database
             self.link_state_db[self.node_id] = {
                 'seq_num': self.seq_num,
                 'neighbors': self.neighbors.copy()
             }
             
-            self.seq_num += 1
             # Flood updated LSA
             self.flood_lsa()
             
@@ -265,7 +265,7 @@ class RouterNode:
         if self.algorithm != 'link_state':
             return
             
-        # self.seq_num += 1
+        self.seq_num += 1
         self.link_state_db[self.node_id] = {
             'seq_num': self.seq_num,
             'neighbors': self.neighbors
@@ -306,14 +306,14 @@ class RouterNode:
                 'seq_num': seq_num,
                 'neighbors': incoming_neighbors
             }
-            print(f"{self.node_id}: Topología actualizada con información de {source}")
+            # print(f"{self.node_id}: Topología actualizada con información de {source}")
         
         # Learn about the neighbors mentioned in this LSA
         for neighbor in incoming_neighbors:
             if neighbor != self.node_id:  # Don't create self-reference
                 if neighbor not in self.link_state_db:
                     # We discovered a new node!
-                    print(f"{self.node_id}: Nodo {neighbor} descubiernto por LSA de {source}")
+                    # print(f"{self.node_id}: Nodo {neighbor} descubiernto por LSA de {source}")
                     # Create a basic entry (we don't know its neighbors yet)
                     self.link_state_db[neighbor] = {
                         'seq_num': -1,  # Unknown sequence number
@@ -325,12 +325,12 @@ class RouterNode:
         
         # If we learned something new, recalculate routing and forward
         if learned_something_new:
-            print(f"{self.node_id}: Recalculado rutas")
+            # print(f"{self.node_id}: Recalculado rutas")
             self.calculate_routing_table()
             
             # Forward to all neighbors except the source
             self.broadcast_to_neighbors(lsa, exclude=[source])
-            print(f"{self.node_id}: Compartiendo LSA de {source} a vecinos")
+            # print(f"{self.node_id}: Compartiendo LSA de {source} a vecinos")
         # else:
             # print(f"{self.node_id}: No hay nueva información en LSA de {source}")
         
